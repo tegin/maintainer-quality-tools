@@ -10,6 +10,8 @@ from six import string_types
 from getaddons import (
     get_addons, get_modules, get_modules_info, get_dependencies)
 from travis_helpers import success_msg, fail_msg
+import psycopg2
+from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 try:
     import ConfigParser
 except ImportError:
@@ -232,10 +234,19 @@ def setup_server(db, odoo_unittest, tested_addons, server_path, script_name,
         server_options = []
     print("\nCreating instance:")
     try:
-        subprocess.check_call(["createdb", db])
-    except subprocess.CalledProcessError:
-        print("Using previous openerp_template database.")
-    else:
+        connection_info = {
+            'dbname': db
+        }
+        if os.environ.get("DB_USERNAME", False):
+            connection_info.update({
+                'user': os.environ.get("DB_USERNAME", False),
+                'password': os.environ.get("DB_PASSWORD", False),
+                'host': os.environ.get("DB_HOST", False),
+                'port': os.environ.get("DB_PORT", 5432),
+            })
+        conn = psycopg2.connect(**connection_info)
+        conn.close()
+    except psycopg2.OperationalError:
         cmd_odoo = ["unbuffer"] if unbuffer else []
         cmd_odoo += ["%s/%s" % (server_path, script_name),
                      "-d", db,
@@ -341,11 +352,19 @@ def main(argv=None):
     addons_path = get_addons_path(travis_dependencies_dir,
                                   travis_build_dir,
                                   server_path)
-    create_server_conf({
+    odoo_conf = {
         # when installing with pip we don't need an addons_path
         'addons_path': addons_path if os.environ.get("MQT_DEP", "OCA") == "OCA" else "",
         'data_dir': data_dir,
-    }, odoo_version)
+    }
+    if os.environ.get('DB_USERNAME', False):
+        odoo_conf.update({
+            'db_user': os.environ.get("DB_USERNAME", False),
+            'db_password': os.environ.get("DB_PASSWORD", False),
+            'db_host': os.environ.get("DB_HOST", False),
+            'db_port': os.environ.get("DB_PORT", 5432),
+        })
+    create_server_conf(odoo_conf, odoo_version)
     tested_addons_list = get_addons_to_check(travis_build_dir,
                                              odoo_include,
                                              odoo_exclude)
@@ -406,11 +425,33 @@ def main(argv=None):
         else:
             print("\nTesting %s:" % tested_addons_list)
         try:
-            db_odoo_created = subprocess.call(
-                ["createdb", "-T", dbtemplate, database])
-            copy_attachments(dbtemplate, database, data_dir)
-        except subprocess.CalledProcessError:
             db_odoo_created = True
+            connection_info = {
+                'dbname': database
+            }
+            if os.environ.get("DB_USERNAME", False):
+                connection_info.update({
+                    'user': os.environ.get("DB_USERNAME", False),
+                    'password': os.environ.get("DB_PASSWORD", False),
+                    'host': os.environ.get("DB_HOST", False),
+                    'port': os.environ.get("DB_PORT", 5432),
+                })
+            conn = psycopg2.connect(**connection_info)
+            conn.close()
+        except psycopg2.OperationalError:
+            try:
+                connection_info['dbname'] = dbtemplate
+                conn = psycopg2.connect(**connection_info)
+                conn.set_isolation_level(ISOLATION_LEVEL_AUTOCOMMIT)
+                cr = conn.cursor()
+                collate = "LC_COLLATE 'C'"
+                cr.execute(
+                    'CREATE DATABASE "%s" ENCODING \'unicode\' %s TEMPLATE "%s"' % (database, collate, dbtemplate)
+                )
+                conn.close()
+                copy_attachments(dbtemplate, database, data_dir)
+            except psycopg2.OperationalError:
+                db_odoo_created = False
         for command, check_loaded in commands:
             if db_odoo_created and instance_alive:
                 # If exists database of odoo test
